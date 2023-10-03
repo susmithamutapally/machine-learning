@@ -1,0 +1,897 @@
+---
+title: "Assignment2"
+author: "Susmitha Mutapally"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    toc: yes
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load the required libraries
+
+```{r message=FALSE,  warning=FALSE }
+# load the required libraries
+library("readxl") 
+library("dplyr") 
+library("FNN") 
+library("caret") 
+library("class") 
+library("rpart.plot") 
+library("rpart") 
+library("glmnet")
+library('NeuralNetTools') 
+library("PRROC") 
+library("ROCR")
+library("tidyverse")
+library("xgboost")
+library("skimr")
+library("fastDummies")
+```
+
+## Data loading and data preparation
+
+```{r message=FALSE,  warning=FALSE }
+# Load the HN data set
+
+hn_data <- read_csv("HN_data_PostModule.csv", col_types = "fnfnnnnnnnnnnnfnnnnnnnnnnff")
+
+
+# replace NA factors as UNK
+hn_data <- hn_data %>%
+  mutate(male = coalesce(male, "UNK")) %>%
+  mutate(good_country = coalesce(good_country,"UNK")) %>%
+  mutate(delta1_good_country = coalesce(delta1_good_country,"UNK"))
+
+
+# create Y and X data frames
+hn_y = hn_data %>% pull("adopter") %>% as.factor()
+# exclude net_user since its a n ID
+hn_x = hn_data %>% select(-c("adopter", "net_user"))
+
+
+#Changing all categorical variables to dummy variables
+hn_x <- dummy_cols(hn_x, remove_selected_columns = TRUE)
+
+# replace missing values with the mean
+hn_x <- hn_x %>% 
+  mutate_if(is.numeric, function(x) ifelse(is.na(x), median(x, na.rm = T), x))
+
+
+```
+
+## Create a function that normalizes columns
+
+```{r}
+# function to normalize data (0 to 1)
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+```
+
+```{r }
+# Normalize x variables
+hn_x_normalized <- as.data.frame(lapply(hn_x, normalize))
+
+```
+
+## Create Training and Testing data sets
+
+```{r }
+
+set.seed(12345)
+
+# 75% of the data is used for training and rest for testing
+smp_size <- floor(0.75 * nrow(hn_x_normalized))
+
+# randomly select row numbers for training data set
+train_ind <- sample(seq_len(nrow(hn_x_normalized)), size = smp_size)
+
+# creating test and training sets for x
+hn_x_train <- hn_x_normalized[train_ind, ]
+hn_x_test <- hn_x_normalized[-train_ind, ]
+
+# creating test and training sets for y
+hn_y_train <- hn_y[train_ind] %>% as.factor()
+hn_y_test <- hn_y[-train_ind] %>% as.factor()
+
+#Create x and y for previous test dataset
+
+hn_x_previous_test = hn_x_test %>% select(-c("delta1_friend_cnt", "delta1_avg_friend_age", "delta1_avg_friend_male", "delta1_friend_country_cnt", "delta1_subscriber_friend_cnt", "delta1_songsListened", "delta1_lovedTracks", "delta1_posts", "delta1_playlists", "delta1_shouts","delta1_good_country_0","delta1_good_country_UNK","delta1_good_country_1","delta1_good_country_.1"))
+
+hn_y_previous_test = hn_y_test
+
+
+# Create an empty data frame to store results from different models
+clf_results <- data.frame(matrix(ncol = 5, nrow = 0))
+names(clf_results) <- c("Model", "Accuracy", "Precision", "Recall", "F1")
+
+clf_results_previous <- data.frame(matrix(ncol = 5, nrow = 0))
+names(clf_results_previous) <- c("Model", "Accuracy", "Precision", "Recall", "F1")
+
+
+```
+
+
+## SMOTE to deal with class imbalance
+
+```{r message=FALSE,  warning=FALSE}
+
+# Check the proportions for the class between all 3 datasets.
+round(prop.table(table(select(hn_data,adopter), exclude = NULL)), 4) * 100
+round(prop.table(table(hn_y_train)), 4) * 100
+round(prop.table(table(hn_y_test)), 4) * 100
+
+# We will use the SMOTE() function from the DMwR package to balance the training data before we build our model.
+#install.packages("abind")
+library("abind")
+
+install.packages( "https://cran.r-project.org/src/contrib/Archive/DMwR/DMwR_0.4.1.tar.gz", repos=NULL, type="source" )
+library("DMwR")
+
+set.seed(12345)
+
+#create the full training dataset with X and y variable
+hn_train <-  cbind(hn_x_train, hn_y_train)
+hn_train_balanced <- SMOTE(hn_y_train ~ ., data.frame(hn_train), perc.over = 100, perc.under = 200)
+
+# Check the proportions for the class between all 3 datasets.
+round(prop.table(table(select(hn_data,adopter), exclude = NULL)), 4) * 100
+round(prop.table(table(hn_train_balanced$hn_y_train)), 4) * 100
+round(prop.table(table(hn_y_test)), 4) * 100
+
+
+#remove the Y column from the newly balanced training set
+hn_x_train <- hn_train_balanced %>% select(-hn_y_train)
+
+#store the Y column
+hn_y_train <- hn_train_balanced %>% pull(hn_y_train) %>% as.factor()
+
+#Create x and y for previous train dataset
+
+hn_x_previous_train = hn_x_train %>% select(-c("delta1_friend_cnt", "delta1_avg_friend_age", "delta1_avg_friend_male", "delta1_friend_country_cnt", "delta1_subscriber_friend_cnt", "delta1_songsListened", "delta1_lovedTracks", "delta1_posts", "delta1_playlists", "delta1_shouts","delta1_good_country_0","delta1_good_country_UNK","delta1_good_country_1","delta1_good_country_.1"))
+
+hn_y_previous_train = hn_y_train
+
+```
+
+
+## KNN Classification using past data
+
+```{r }
+
+# Cross validation 
+cross_validation <- trainControl(## 10-fold CV
+                                method = "repeatedcv",
+                                number = 10,
+                                ## repeated three times
+                                repeats = 3)
+# Hyperparamter tuning
+Param_Grid <-  expand.grid( k = 1:10)
+
+# fit the model to training data
+knn_clf_fit_previous <- train(hn_x_previous_train,
+                     hn_y_previous_train, 
+                     method = "knn",
+                     tuneGrid = Param_Grid,
+                     trControl = cross_validation )
+
+# check the accuracy for different models
+knn_clf_fit_previous
+
+```
+
+
+```{r }
+# Predict on test data
+knnPredict_previous <- predict(knn_clf_fit_previous, newdata = hn_x_previous_test) 
+
+```
+
+```{r }
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+confusionMatrix(knnPredict_previous, hn_y_previous_test)
+
+# Add results into clf_results dataframe
+x1 <- confusionMatrix(knnPredict_previous, hn_y_previous_test)[["overall"]]
+y1 <- confusionMatrix(knnPredict_previous, hn_y_previous_test)[["byClass"]]
+
+clf_results_previous[nrow(clf_results_previous) + 1,] <-  list(Model = "KNN", 
+                                             Accuracy = round (x1[["Accuracy"]],3), 
+                                            Precision = round (y1[["Precision"]],3), 
+                                            Recall = round (y1[["Recall"]],3), 
+                                            F1 = round (y1[["F1"]],3))
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x1[["Accuracy"]],3), "and F1 is ", round (y1[["F1"]],3)  )
+
+```
+
+## KNN Classification on all data
+
+```{r }
+
+# Cross validation 
+cross_validation <- trainControl(## 10-fold CV
+                                method = "repeatedcv",
+                                number = 10,
+                                ## repeated three times
+                                repeats = 3)
+# Hyperparamter tuning
+# k = number of nrearest neighbours
+Param_Grid <-  expand.grid( k = 1:10)
+
+# fit the model to training data
+knn_clf_fit <- train(hn_x_train,
+                     hn_y_train, 
+                     method = "knn",
+                     tuneGrid = Param_Grid,
+                     trControl = cross_validation )
+
+# check the accuracy for different models
+knn_clf_fit
+
+```
+
+
+```{r }
+# Predict on test data
+knnPredict <- predict(knn_clf_fit, newdata = hn_x_test) 
+
+```
+
+```{r }
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+confusionMatrix(knnPredict, hn_y_test)
+
+# Add results into clf_results dataframe
+x2 <- confusionMatrix(knnPredict, hn_y_test)[["overall"]]
+y2 <- confusionMatrix(knnPredict, hn_y_test)[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "KNN", 
+                                             Accuracy = round (x2[["Accuracy"]],3), 
+                                            Precision = round (y2[["Precision"]],3), 
+                                            Recall = round (y2[["Recall"]],3), 
+                                            F1 = round (y2[["F1"]],3))
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x2[["Accuracy"]],3), "and F1 is ", round (y2[["F1"]],3)  )
+
+
+```
+
+## Decision Tree Using Past Data 
+
+```{r }
+
+# Cross validation
+cross_validation <- trainControl(## 10-fold CV
+                                method = "repeatedcv",
+                                number = 10,
+                                ## repeated three times
+                                repeats = 3)
+
+Param_Grid <-  expand.grid(maxdepth = 1:10)
+modelLookup("rpart2")
+
+dtree_fit_previous <- train(hn_x_previous_train,
+                   hn_y_previous_train, 
+                   method = "rpart2",
+                   parms = list(split = "gini"),
+                  tuneGrid = Param_Grid,
+                   trControl = cross_validation,
+                   preProc = c("center", "scale"))
+
+# check the accuracy for different models
+dtree_fit_previous
+```
+
+```{r }
+# print the final model
+dtree_fit_previous$finalModel
+```
+
+```{r }
+# Plot decision tree
+prp(dtree_fit_previous$finalModel, box.palette = "Reds", tweak = 1.2)
+```
+
+```{r }
+# Predict on test data
+dtree_predict_previous <- predict(dtree_fit_previous, newdata = hn_x_test)
+```
+
+```{r }
+# Print Confusion matrix, Accuarcy, Sensitivity etc 
+confusionMatrix(dtree_predict_previous,  hn_y_previous_test )
+
+# Add results into clf_results dataframe
+x3 <- confusionMatrix(dtree_predict_previous,  hn_y_previous_test )[["overall"]]
+y3 <- confusionMatrix(dtree_predict_previous,  hn_y_previous_test )[["byClass"]]
+
+clf_results_previous[nrow(clf_results_previous) + 1,] <-  list(Model = "Decision Tree", 
+                                             Accuracy = round (x3[["Accuracy"]],3), 
+                                            Precision = round (y3[["Precision"]],3), 
+                                            Recall = round (y3[["Recall"]],3), 
+                                            F1 = round (y3[["F1"]],3))
+
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x3[["Accuracy"]],3), "and F1 is ", round (y3[["F1"]],3)  )
+
+```
+
+## Decision Tree Using All Data 
+
+```{r }
+
+# Cross validation
+cross_validation <- trainControl(## 10-fold CV
+                                method = "repeatedcv",
+                                number = 10,
+                                ## repeated three times
+                                repeats = 3)
+
+Param_Grid <-  expand.grid(maxdepth = 1:10)
+modelLookup("rpart2")
+
+dtree_fit <- train(hn_x_train,
+                   hn_y_train, 
+                   method = "rpart2",
+                   parms = list(split = "gini"),
+                  tuneGrid = Param_Grid,
+                   trControl = cross_validation,
+                   preProc = c("center", "scale"))
+
+# check the accuracy for different models
+dtree_fit
+```
+
+```{r }
+# print the final model
+dtree_fit$finalModel
+```
+
+```{r }
+# Plot decision tree
+prp(dtree_fit$finalModel, box.palette = "Reds", tweak = 1.2)
+```
+
+```{r }
+# Predict on test data
+dtree_predict <- predict(dtree_fit, newdata = hn_x_test)
+```
+
+```{r }
+# Print Confusion matrix, Accuarcy, Sensitivity etc 
+confusionMatrix(dtree_predict,  hn_y_test )
+
+# Add results into clf_results dataframe
+x4 <- confusionMatrix(dtree_predict,  hn_y_test )[["overall"]]
+y4 <- confusionMatrix(dtree_predict,  hn_y_test )[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "Decision Tree", 
+                                             Accuracy = round (x4[["Accuracy"]],3), 
+                                            Precision = round (y4[["Precision"]],3), 
+                                            Recall = round (y4[["Recall"]],3), 
+                                            F1 = round (y4[["F1"]],3))
+
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x4[["Accuracy"]],3), "and F1 is ", round (y4[["F1"]],3)  )
+
+```
+
+## Logistic regression using Past data
+
+```{r  message=FALSE,  warning=FALSE}
+glm_fit_previous <- train(hn_x_previous_train,
+                 hn_y_previous_train, 
+                 method = "glm",
+                 family = "binomial",
+                 preProc = c("center", "scale"))
+```
+
+```{r }
+# Predict on test data
+glm_predict_previous <- predict(glm_fit_previous, newdata = hn_x_previous_test)
+glm_predict_prob_previous <- predict(glm_fit_previous, newdata = hn_x_previous_test, type="prob")
+
+```
+
+convert probability outcome into categorical outcome 
+```{r }
+y_pred_num_previous <- ifelse(glm_predict_prob_previous[1] > 0.9, 1, 0)
+```
+
+```{r }
+# Print Confusion matrix, Accuarcy, Sensitivity etc 
+confusionMatrix(as.factor(y_pred_num_previous), as.factor(hn_y_previous_test), positive = "1")
+
+# Add results into clf_results dataframe
+x5 <- confusionMatrix(as.factor(y_pred_num_previous), as.factor(hn_y_previous_test), positive = "1")[["overall"]]
+y5 <- confusionMatrix(as.factor(y_pred_num_previous), as.factor(hn_y_previous_test),positive = "1")[["byClass"]]
+
+clf_results_previous[nrow(clf_results_previous) + 1,] <-  list(Model = "Logistic Regression", 
+                                             Accuracy = round (x5[["Accuracy"]],3), 
+                                            Precision = round (y5[["Precision"]],3), 
+                                            Recall = round (y5[["Recall"]],3), 
+                                            F1 = round (y5[["F1"]],3))
+
+# Print Accuracy and F1 score
+cat("Accuarcy is ", round(x5[["Accuracy"]],3), "and F1 is ", round (y5[["F1"]],3)  )
+
+```
+
+## Logistic regression using all data
+
+```{r  message=FALSE,  warning=FALSE}
+glm_fit <- train(hn_x_train,
+                 hn_y_train, 
+                 method = "glm",
+                 family = "binomial",
+                 preProc = c("center", "scale"))
+```
+
+```{r }
+# Predict on test data
+glm_predict <- predict(glm_fit, newdata = hn_x_test)
+glm_predict_prob <- predict(glm_fit, newdata = hn_x_test, type="prob")
+
+```
+
+convert probability outcome into categorical outcome 
+```{r }
+y_pred_num <- ifelse(glm_predict_prob[1] > 0.9, 1, 0)
+```
+
+```{r }
+# Print Confusion matrix, Accuarcy, Sensitivity etc 
+confusionMatrix(as.factor(y_pred_num), as.factor(hn_y_test), positive = "1")
+
+# Add results into clf_results dataframe
+x6 <- confusionMatrix(as.factor(y_pred_num), as.factor(hn_y_test), positive = "1")[["overall"]]
+y6 <- confusionMatrix(as.factor(y_pred_num), as.factor(hn_y_test),positive = "1")[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "Logistic Regression", 
+                                             Accuracy = round (x6[["Accuracy"]],3), 
+                                            Precision = round (y6[["Precision"]],3), 
+                                            Recall = round (y6[["Recall"]],3), 
+                                            F1 = round (y6[["F1"]],3))
+
+# Print Accuracy and F1 score
+cat("Accuarcy is ", round(x6[["Accuracy"]],3), "and F1 is ", round (y6[["F1"]],3)  )
+
+```
+
+## XGBoost for Past Data
+
+```{r message=FALSE,  warning=FALSE}
+XG_clf_fit_previous <- train(hn_x_previous_train, 
+                    hn_y_previous_train,
+                    method = "xgbTree",
+                    preProc = c("center", "scale"),
+                    verbosity=0)
+```
+
+```{r }
+# print the final model
+XG_clf_fit_previous$finalModel
+```
+
+```{r }
+# Predict on test data
+XG_clf_predict_previous <- predict(XG_clf_fit_previous,hn_x_previous_test)
+```
+
+```{r }
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+confusionMatrix(XG_clf_predict_previous,  hn_y_previous_test )
+
+# Add results into clf_results dataframe
+x7 <- confusionMatrix(XG_clf_predict_previous,  hn_y_previous_test )[["overall"]]
+y7 <- confusionMatrix(XG_clf_predict_previous,  hn_y_previous_test )[["byClass"]]
+
+clf_results_previous[nrow(clf_results_previous) + 1,] <-  list(Model = "XG Boost", 
+                                             Accuracy = round (x7[["Accuracy"]],3), 
+                                            Precision = round (y7[["Precision"]],3), 
+                                            Recall = round (y7[["Recall"]],3), 
+                                            F1 = round (y7[["F1"]],3))
+
+# Print Accuracy and F1 score
+cat("Accuarcy is ", round(x7[["Accuracy"]],3), "and F1 is ", round (y7[["F1"]],3)  )
+
+
+```
+
+## XGBoost for All Data
+
+```{r message=FALSE,  warning=FALSE}
+XG_clf_fit <- train(hn_x_train, 
+                    hn_y_train,
+                    method = "xgbTree",
+                    preProc = c("center", "scale"),
+                    verbosity = 0)
+```
+
+```{r }
+# print the final model
+XG_clf_fit$finalModel
+```
+
+```{r }
+# Predict on test data
+XG_clf_predict <- predict(XG_clf_fit,hn_x_test)
+```
+
+```{r }
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+confusionMatrix(XG_clf_predict,  hn_y_test )
+
+# Add results into clf_results dataframe
+x8 <- confusionMatrix(XG_clf_predict,  hn_y_test )[["overall"]]
+y8 <- confusionMatrix(XG_clf_predict,  hn_y_test )[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "XG Boost", 
+                                             Accuracy = round (x8[["Accuracy"]],3), 
+                                            Precision = round (y8[["Precision"]],3), 
+                                            Recall = round (y8[["Recall"]],3), 
+                                            F1 = round (y8[["F1"]],3))
+
+# Print Accuracy and F1 score
+cat("Accuarcy is ", round(x8[["Accuracy"]],3), "and F1 is ", round (y7[["F1"]],3)  )
+
+
+```
+
+## Neural Network on Past Data
+
+```{r message=FALSE,  warning=FALSE }
+
+
+my.grid <- expand.grid(.decay = c(0.5, 0.1), .size = c(3,5,6,7,9))
+
+
+nn_clf_fit_previous <- train(hn_x_previous_train,
+                    hn_y_previous_train,
+                    method = "nnet",
+                    trace = F,
+                    tuneGrid = my.grid,
+                    linout = 0,
+                    stepmax = 100,
+                    threshold = 0.01 )
+print(nn_clf_fit_previous)
+
+# Plot Neural Network 
+plotnet(nn_clf_fit_previous$finalModel, y_names = "Adopters")
+
+```
+
+```{r }
+# Predict on test data
+nn_clf_predict_previous <- predict(nn_clf_fit_previous,hn_x_previous_test)
+```
+
+Confusion matrix
+```{r }
+# Print Confusion matrix, Accuarcy, Sensitivity etc 
+confusionMatrix(nn_clf_predict_previous,  hn_y_previous_test)
+
+# Add results into clf_results dataframe
+x9 <- confusionMatrix(nn_clf_predict_previous,  hn_y_previous_test)[["overall"]]
+y9 <- confusionMatrix(nn_clf_predict_previous,  hn_y_previous_test)[["byClass"]]
+
+clf_results_previous[nrow(clf_results_previous) + 1,] <-  list(Model = "Neural Network", 
+                                             Accuracy = round (x9[["Accuracy"]],3), 
+                                            Precision = round (y9[["Precision"]],3), 
+                                            Recall = round (y9[["Recall"]],3), 
+                                            F1 = round (y9[["F1"]],3))
+
+# Print Accuracy and F1 score
+cat("Accuarcy is ", round(x9[["Accuracy"]],3), "and F1 is ", round (y9[["F1"]],3)  )
+
+
+```
+
+## Neural Network on All Data
+
+```{r message=FALSE,  warning=FALSE }
+
+my.grid <- expand.grid(.decay = c(0.5, 0.1), .size = c(3,5,6,7,9))
+
+nn_clf_fit <- train(hn_x_train,
+                    hn_y_train,
+                    method = "nnet",
+                    trace = F,
+                    tuneGrid = my.grid,
+                    linout = 0,
+                    stepmax = 100,
+                    threshold = 0.01 )
+print(nn_clf_fit)
+
+# Plot Neural Network 
+plotnet(nn_clf_fit$finalModel, y_names = "Adopters")
+
+```
+
+```{r }
+# Predict on test data
+nn_clf_predict <- predict(nn_clf_fit,hn_x_test)
+```
+
+Confusion matrix
+```{r }
+# Print Confusion matrix, Accuarcy, Sensitivity etc 
+confusionMatrix(nn_clf_predict,  hn_y_test)
+
+# Add results into clf_results dataframe
+x10 <- confusionMatrix(nn_clf_predict,  hn_y_test)[["overall"]]
+y10 <- confusionMatrix(nn_clf_predict,  hn_y_test)[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "Neural Network", 
+                                             Accuracy = round (x10[["Accuracy"]],3), 
+                                            Precision = round (y10[["Precision"]],3), 
+                                            Recall = round (y10[["Recall"]],3), 
+                                            F1 = round (y10[["F1"]],3))
+
+# Print Accuracy and F1 score
+cat("Accuarcy is ", round(x10[["Accuracy"]],3), "and F1 is ", round (y10[["F1"]],3)  )
+
+
+```
+## Random Forests on Past Data
+
+```{r message=FALSE, warning=FALSE}
+set.seed(100)
+
+#By default, the train function without any arguments re-runs the model over 25 bootstrap samples and across 3 options of the tuning parameter (the tuning #parameter for ranger is mtry; the number of randomly selected predictors at each cut in the tree).
+
+randomforest_fit_previous <- train(hn_x_previous_train,
+                   hn_y_previous_train, 
+                   method = "ranger",
+                   importance = "permutation",
+                   verbosity=0
+                  )
+
+#Permutation Importance is assessed for each feature by removing the association between that feature and the target. #This is achieved by randomly #permuting the values of the feature and measuring the resulting increase in error. The influence of the correlated features #is also removed.
+
+# print the  model
+randomforest_fit_previous
+
+```
+
+
+```{r}
+# Predict on test data
+randomforest_predict_previous <- predict(randomforest_fit_previous,hn_x_previous_test)
+```
+
+
+
+```{r}
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+#clf_results <- clf_results[-5,]
+confusionMatrix(as.factor(randomforest_predict_previous), as.factor(hn_y_previous_test))
+
+
+
+# Add results into clf_results dataframe
+x1 <- confusionMatrix(randomforest_predict_previous, hn_y_previous_test, positive = "1")[["overall"]]
+y1 <- confusionMatrix(randomforest_predict_previous, hn_y_previous_test, positive = "1")[["byClass"]]
+
+clf_results_previous[nrow(clf_results_previous) + 1,] <-  list(Model = "Random Forest", 
+                                             Accuracy = round (x1[["Accuracy"]],3), 
+                                             Precision = round (y1[["Precision"]],3), 
+                                             Recall = round (y1[["Recall"]],3), 
+                                             F1 = round (y1[["F1"]],3))
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x1[["Accuracy"]],3), "and F1 is ", round (y1[["F1"]],3)  )
+
+
+```
+
+## Random Forests on All Data
+
+```{r}
+set.seed(100)
+
+#By default, the train function without any arguments re-runs the model over 25 bootstrap samples and across 3 options of the tuning parameter (the tuning #parameter for ranger is mtry; the number of randomly selected predictors at each cut in the tree).
+
+randomforest_fit <- train(hn_x_train,
+                   hn_y_train, 
+                   method = "ranger",
+                   importance = "permutation",
+                  )
+
+#Permutation Importance is assessed for each feature by removing the association between that feature and the target. #This is achieved by randomly #permuting the values of the feature and measuring the resulting increase in error. The influence of the correlated features #is also removed.
+
+# print the  model
+randomforest_fit
+
+```
+
+
+```{r}
+# Predict on test data
+randomforest_predict <- predict(randomforest_fit,hn_x_test)
+```
+
+
+
+```{r}
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+#clf_results <- clf_results[-5,]
+confusionMatrix(as.factor(randomforest_predict), as.factor(hn_y_test))
+
+
+
+# Add results into clf_results dataframe
+x1 <- confusionMatrix(randomforest_predict, hn_y_test, positive = "1")[["overall"]]
+y1 <- confusionMatrix(randomforest_predict, hn_y_test, positive = "1")[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "Random Forest", 
+                                             Accuracy = round (x1[["Accuracy"]],3), 
+                                             Precision = round (y1[["Precision"]],3), 
+                                             Recall = round (y1[["Recall"]],3), 
+                                             F1 = round (y1[["F1"]],3))
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x1[["Accuracy"]],3), "and F1 is ", round (y1[["F1"]],3)  )
+
+
+```
+ 
+ 
+##Compare Accuracy for all models
+
+```{r }
+
+print(clf_results)
+print(clf_results_previous)
+
+# Plot accuracy for all Models
+
+ggplot(clf_results %>% arrange(desc(Accuracy)) %>%
+       mutate(Model=factor(Model, levels=Model) ), 
+       aes(x = Model, y = Accuracy)) +
+  geom_bar(stat = "identity" , width=0.3, fill="steelblue") + 
+  coord_cartesian(ylim = c(0, 1)) +
+  geom_hline(aes(yintercept = mean(Accuracy)),
+             colour = "darkgreen",linetype="dashed") +
+  ggtitle("Accuracy using all data") +
+  theme(plot.title = element_text(color="black", size=10, hjust = 0.5)) +
+  geom_text(aes(label=Accuracy), position=position_dodge(width=0.9), vjust=-0.25)
+
+ggplot(clf_results_previous %>% arrange(desc(Accuracy)) %>%
+       mutate(Model=factor(Model, levels=Model) ), 
+       aes(x = Model, y = Accuracy)) +
+  geom_bar(stat = "identity" , width=0.3, fill="steelblue") + 
+  coord_cartesian(ylim = c(0, 1)) +
+  geom_hline(aes(yintercept = mean(Accuracy)),
+             colour = "darkgreen",linetype="dashed") +
+  ggtitle("Accuracy using past data") +
+  theme(plot.title = element_text(color="black", size=10, hjust = 0.5)) +
+  geom_text(aes(label=Accuracy), position=position_dodge(width=0.9), vjust=-0.25)
+
+
+```
+
+## ROC curves for all models
+
+```{r}
+
+# Predict probabilities of each model to plot ROC curve
+knnPredict_prob_previous <- predict(knn_clf_fit_previous, newdata = hn_x_previous_test, type = "prob") 
+dtree_prob_previous <- predict(dtree_fit_previous, newdata = hn_x_previous_test, type = "prob")
+glm_predict_prob_previous <- predict(glm_fit_previous, newdata = hn_x_previous_test, type = "prob")
+XG_boost_prob_previous <- predict(XG_clf_fit_previous, newdata = hn_x_previous_test, type = "prob")
+nn_clf_prob_previous <- predict(nn_clf_fit_previous, newdata = hn_x_previous_test, type = "prob")
+# randomforest_prob_previous <- predict(randomforest_fit_previous, hn_x_previous_test, type = "prob")
+
+knnPredict_prob <- predict(knn_clf_fit, newdata = hn_x_test, type = "prob") 
+dtree_prob <- predict(dtree_fit, newdata = hn_x_test, type = "prob")
+glm_predict_prob <- predict(glm_fit, newdata = hn_x_test, type = "prob")
+XG_boost_prob <- predict(XG_clf_fit, newdata = hn_x_test, type = "prob")
+nn_clf_prob <- predict(nn_clf_fit, newdata = hn_x_test, type = "prob")
+# randomforest_prob <- predict(randomforest_fit, newdata = hn_x_test, type = "prob")
+
+# List of predictions
+preds_list <- list(knnPredict_prob_previous[,1], dtree_prob_previous[,1], 
+                 glm_predict_prob_previous[,1], XG_boost_prob_previous[,1], nn_clf_prob_previous[,1],
+                 knnPredict_prob[,1], dtree_prob[,1], glm_predict_prob[,1], XG_boost_prob[,1], nn_clf_prob[,1])
+
+# List of actual values (same for all)
+m <- length(preds_list)
+actuals_list <- rep(list(hn_y_test), m-1)
+actuals_list[[m]] = hn_y_test
+
+# Plot the ROC curves
+pred <- prediction(preds_list, actuals_list, label.ordering = c("1","0"))
+rocs <- performance(pred, "tpr", "fpr")
+
+# calculate AUC for all models
+AUC_models <- performance(pred, "auc")
+auc_knn_previous = round(AUC_models@y.values[[1]], 3)
+auc_dt_previous = round(AUC_models@y.values[[2]], 3)
+auc_lr_previous = round(AUC_models@y.values[[3]], 3)
+auc_xg_previous = round(AUC_models@y.values[[4]], 3)
+auc_nn_previous = round(AUC_models@y.values[[5]], 3)
+# auc_rf_previous = round(AUC_models@y.values[[6]], 3)
+auc_knn = round(AUC_models@y.values[[6]], 3)
+auc_dt = round(AUC_models@y.values[[7]], 3)
+auc_lr = round(AUC_models@y.values[[8]], 3)
+auc_xg = round(AUC_models@y.values[[9]], 3)
+auc_nn = round(AUC_models@y.values[[10]], 3)
+# auc_rf = round(AUC_models@y.values[[11]], 3)
+
+
+# Plot the ROC curves
+plot(rocs, col = as.list(1:m), main = "ROC Curves using all Data")
+legend(x = "bottomright", 
+       legend = c( paste0("KNN_previous - ", auc_knn_previous), 
+                   paste0("DT_previous - ", auc_dt_previous), 
+                   paste0("LR_previous - ", auc_lr_previous), 
+                   paste0("XGB_previous - ", auc_xg_previous), 
+                   paste0("NN_previous - ", auc_nn_previous),
+                   # paste0("RF_previous - ", auc_rf_previous),
+                   paste0("KNN - ", auc_knn), 
+                   paste0("DT - ", auc_dt), 
+                   paste0("LR - ", auc_lr), 
+                   paste0("XGB - ", auc_xg), 
+                   paste0("NN - ", auc_nn)), fill = 1:m)
+
+
+
+```
+
+
+
+# # Although the model with the highest accuracy is Logistic Regression, F1 score was very low due to low precision and low recall.I would choose XGBoost model based on the area under the curve and F1 score. To choose the final best predictive model, we can also build a confusion matrix and use the Cost Benefit Analysis if we have the costs available to us. 
+
+
+## Select the top 1000 probabilities of conversions using XG Boost with all data
+
+```{r}
+
+XG_boost_prob_hn_data <- predict(XG_clf_fit, newdata = hn_x_normalized, type = "prob")
+yy_predict <- cbind(hn_data, prob=XG_boost_prob_hn_data[,2]) 
+
+yy_non_adopters <- subset(yy_predict, adopter == 0)
+
+top1000 <- yy_non_adopters[order(-yy_non_adopters$prob),][1:1000,]
+
+view(top1000)
+
+```
+
+# # Extra credit (worth up to 3 extra % points)
+How can we make sure that if we target the people we can compute the correct ROI from the
+proposed model? Describe your strategy of actually deploying the targeting strategy from the
+predictive model. 
+
+To enhance the conversion of free users to premium subscribers and calculate the correct Return on Investment (ROI) from the proposed two-month free trial promotion, a data-driven strategy should be implemented as follows. 
+
+We can start by collecting and segmenting user data. This includes user behavior, engagement patterns, demographics, and past interactions with the platform. Segmentation should categorize users into various groups based on their likelihood to convert. Analyze historical data to identify patterns and predictors of premium user conversion. These may include factors like the frequency of use, the number of playlists created, or the genre of music preferred.
+
+Build a predictive model using machine learning algorithms to assess the conversion likelihood of each user. Train the model on historical data, using conversion as the target variable.Validate the model's accuracy by using holdout data or cross-validation techniques. Ensure that the model provides reliable predictions of conversion likelihood.Deploy the predictive model to assign conversion probabilities to each free user. Prioritize users with higher conversion probabilities for the two-month free trial promotion.
+
+Implement A/B testing to compare the conversion rates of users who receive the two-month free trial promotion with a control group that does not receive the offer. This will help measure the effectiveness of the promotion.Calculate the ROI by comparing the increase in premium subscriptions and associated revenue with the costs of providing the free trial. Consider both short-term and long-term impacts on user behavior.
+
+By implementing this data-driven targeting strategy, HighNote can optimize its efforts to convert free users into premium subscribers while accurately measuring the ROI of the two-month free trial promotion. This approach allows for a dynamic response to user behavior and preferences, ultimately improving the profitability.
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,928 @@
+---
+title: "Income Prediction - Credit card offer or denail"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 2
+  html_document:
+    toc: true
+    toc_depth: 2
+    df_print: paged
+---
+\newpage
+
+
+## Models implemented:
+1.	Logistic Regression
+2.	K-NN Classification
+3.	Decision Trees
+4.	Random Forests
+5.	Neural Networks
+6.	XGBoost
+7.	XGBoost with SMOTE (Chosen model)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#setwd("C:\\Users\\rbapna\\Dropbox\\NYUPredModelingCourse\\labs\\labGroupCompetition-Income")
+#change above to your working directory
+```
+
+
+```{r message=FALSE,  warning=FALSE}
+library("tidyverse")
+library("skimr")
+library("readxl") # used to read excel files
+library("dplyr") # used for data munging 
+library("FNN") # used for knn regression (knn.reg function)
+library("caret") # used for various predictive models
+library("class") # for using confusion matrix function
+library("rpart.plot") # used to plot decision tree
+library("rpart")  # used for Regression tree
+library("glmnet") # used for Lasso and Ridge regression
+library('NeuralNetTools') # used to plot Neural Networks
+library("PRROC") # top plot ROC curve
+library("ROCR") # top plot lift curve
+```
+
+
+# 1. Classification
+
+
+## 1.1 Data loading,  exploration and preparation for modeling
+
+There are customers with known income and those without known income (the training and test sets respectively). The data contain 48842 instances with a mix of continuous and discrete (train=32561, test=16281) in two files named “CL-income-train.csv” (this is the same as your homework file 'CL-income.xlsx') and “test.csv” respectively. Lets load the training data
+
+```{r }
+# Load the training data
+
+#read the CSV file into a data frame 'income_df'
+income_df <- read_csv("train-baggle.csv", col_types = "nffnfffffnff")
+
+# lets look at all the variables
+skim(income_df)
+
+#do some exploratory analysis of the categorical features of the data
+
+income_df %>%  keep(is.factor) %>%  summary()
+
+# There are few features with more than 6 levels.
+# We use the table() function to get the distribution for their values.
+table(select(income_df, workClassification))
+table(select(income_df, educationLevel))
+table(select(income_df, occupation))
+table(select(income_df, nativeCountry))
+
+# There are missing values for workClassification, nativeCountry and occupation.
+# The missing values are represented by an indicator variable of '?'.
+# Let's replace these with 'UNK' instead.
+
+income_df <- income_df %>%
+  mutate(workClassification = recode(workClassification, "?" = "UNK")) %>%
+  mutate(nativeCountry = recode(nativeCountry, "?" = "UNK")) %>%
+  mutate(occupation = recode(occupation, "?" = "UNK")) 
+
+# What do we now have?
+table(select(income_df, workClassification))
+table(select(income_df, occupation))
+table(select(income_df, nativeCountry))
+
+
+# Before we build our model, let's also recode our class levels to 0 and 1. 
+#income_df <- income_df %>%
+  #mutate(income = recode(income, "<=50K" = "0")) %>%
+  #mutate(income = recode(income, ">50K" = "1"))
+
+# What do we now have?
+summary(income_df[,"income"])
+
+# create Y and X data frames
+#we will need the y column as a vector (X to be a dataframe)
+# dplyr allows us to do this by using 'pull' instead of select
+income_df_y = income_df %>% pull("income") 
+
+
+income_df_x = income_df %>% select(-c("income"))
+
+
+
+```
+
+
+
+```{r}
+
+#Changing all categorical variables to dummy variables.
+income_df_dummy_x <- dummy_cols(income_df_x, remove_selected_columns = TRUE)
+                   
+```
+
+
+## 1.3 Split the data into training and validation
+```{r }
+# 75% of the data is used for training and rest for validation
+set.seed(12345)
+smp_size <- floor(0.75 * nrow(income_df_dummy_x))
+
+# randomly select row numbers for training data set
+train_ind <- sample(seq_len(nrow(income_df_dummy_x)), size = smp_size)
+
+# creating test and training sets for x
+income_df_train_x <- income_df_dummy_x[train_ind, ]
+income_df_valid_x <-  income_df_dummy_x[-train_ind, ]
+
+# creating test and training sets for y
+income_df_train_y <- income_df_y[train_ind]
+income_df_valid_y  <- income_df_y[-train_ind]
+
+# Create an empty data frame to store results from different models
+clf_results <- data.frame(matrix(ncol = 5, nrow = 0))
+names(clf_results) <- c("Model", "Accuracy", "Precision", "Recall", "F1")
+
+# Create an empty data frame to store TP, TN, FP and FN values
+cost_benefit_df <- data.frame(matrix(ncol = 5, nrow = 0))
+names(cost_benefit_df) <- c("Model", "TP", "FN", "FP", "TN")
+```
+
+
+## 1.4 Logistic Regression
+```{r  message=FALSE,  warning=FALSE}
+#choice of model(s) method is yours
+#make sure that if you use kNN for instance that you normalize  the data
+glm_fit <- train(income_df_train_x,
+                 income_df_train_y, 
+                 method = "glm",
+                 family = "binomial",
+                 preProc = c("center", "scale"))
+```
+
+
+```{r}
+# Predict using logistic regression model
+glm_predict = predict(glm_fit, newdata = income_df_valid_x)
+
+```
+
+## 1.5 Evaluate on validation data
+
+Look at the model performance on validation data. Various commands to look at the models' performance on the validation data. Note that you dont have the test data set's true values. Only I have them and I will give you the total profit after you upload your predictions
+
+```{r }
+## assumes you have a data frame y_validation_pred_num 
+##which is the output prediction on validation set in factor form using your chosen threshold
+
+## assumes you have data frames 'income_df_validation_x' and 'income_df_validation_y' 
+## based on a 75% - 25% split of the training set into train and validation
+
+##Print Confusion matrix, Accuracy, Sensitivity etc 
+##first 2 arguments should be factors: prediction and actual
+##make class '1' as the positive class
+confusionMatrix(as.factor(glm_predict), as.factor(income_df_valid_y), positive="1")
+
+
+
+# Add results into clf_results dataframe
+x1 <- confusionMatrix(glm_predict, income_df_valid_y, positive = "1")[["overall"]]
+y1 <- confusionMatrix(glm_predict, income_df_valid_y, positive = "1")[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "Logistic Regression", 
+                                             Accuracy = round (x1[["Accuracy"]],3), 
+                                             Precision = round (y1[["Precision"]],3), 
+                                             Recall = round (y1[["Recall"]],3), 
+                                             F1 = round (y1[["F1"]],3))
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x1[["Accuracy"]],3), "and F1 is ", round (y1[["F1"]],3)  )
+
+# Add results into cost_benefit_df dataframe for cost benefit analysis 
+a1 <- confusionMatrix(glm_predict, income_df_valid_y)
+
+
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <-  list(Model = "Logistic Regression", 
+                                             TP = a1[["table"]][4], 
+                                             FN = a1[["table"]][3], 
+                                             FP = a1[["table"]][2], 
+                                             TN = a1[["table"]][1]) 
+
+
+
+ 
+# a5 <-confusionMatrix(prediction, actual, positive="1")
+# x1 <- confusionMatrix(prediction, actual, positive="1"))[["overall"]]
+# y3 <- confusionMatrix(prediction, actual, positive="1")[["byClass"]]
+# 
+# 
+# cat("Recall of positive class is", round (y3[["Recall"]],3), "\n")
+# cat("Precision of positive class is", round (y3[["Precision"]],3), "\n")
+# cat("F score of positive class is", round (y3[["F1"]],3), "\n")
+# 
+# #calculate AUC
+# 
+# 
+
+# pred1 <- prediction(y_validation_pred_num, income_df_validation_y)
+# rocs <- performance(pred1, "tpr", "fpr")
+# 
+# # calculate AUC for all models
+# AUC_models <- performance(pred1, "auc")
+# auc_logistic = round(AUC_models@y.values[[1]], 3)
+# cat("AUC is", auc_logistic)
+# 
+# 
+# #unpack the confusion matrix
+# 
+#   TP = a5[["table"]][4]
+#   FP = a5[["table"]][2]
+#   FN = a5[["table"]][3]
+#   TN = a5[["table"]][1]
+  
+#calculate profit
+
+```
+
+Create a function that normalizes columns since scale for each column might be different.
+```{r}
+# function to normalize data (0 to 1)
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+```
+
+
+```{r}
+# Normalize x variables since they are at different scale
+train_x_normalized <- as.data.frame(lapply(income_df_train_x, normalize))
+ 
+valid_x_normalized <- as.data.frame(lapply(income_df_valid_x, normalize))
+```
+
+
+```{r}
+train_x_normalized <- subset(train_x_normalized, select = -nativeCountry_Holand.Netherlands)
+
+valid_x_normalized <- subset(valid_x_normalized, select = -nativeCountry_Holand.Netherlands)
+```
+
+## K-Nearest Neighbors model
+```{r}
+#format(Sys.time(), "%a %b %d %H:%M:%S %Y")
+
+# Cross validation 
+cross_validation <- trainControl(## 10-fold CV
+                                method = "repeatedcv",
+                                number = 10,
+                                ## repeated three times
+                                repeats = 3)
+# Hyperparamter tuning 
+Param_Grid <-  expand.grid(k = 1:10)
+
+#Param_Grid <-  expand.grid(k = 9)
+
+# fit the model to training data
+knn_fit <- train(train_x_normalized,
+                   income_df_train_y, 
+                     method = "knn",
+                     tuneGrid = Param_Grid,
+                     trControl = cross_validation )
+
+# check the accuracy
+knn_fit
+
+#format(Sys.time(), "%a %b %d %H:%M:%S %Y")
+```
+```{r}
+summary(knn_fit)
+```
+```{r}
+knn_predict = predict(knn_fit, newdata = valid_x_normalized)
+```
+
+```{r}
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+confusionMatrix(as.factor(knn_predict), as.factor(income_df_valid_y), positive = "1")
+
+
+
+# Add results into clf_results dataframe
+x1 <- confusionMatrix(knn_predict, income_df_valid_y, positive = "1")[["overall"]]
+y1 <- confusionMatrix(knn_predict, income_df_valid_y, positive = "1")[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "K-Nearest Neighbors", 
+                                             Accuracy = round (x1[["Accuracy"]],3), 
+                                             Precision = round (y1[["Precision"]],3), 
+                                             Recall = round (y1[["Recall"]],3), 
+                                             F1 = round (y1[["F1"]],3))
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x1[["Accuracy"]],3), "and F1 is ", round (y1[["F1"]],3)  )
+
+# Add results into cost_benefit_df dataframe for cost benefit analysis 
+a1 <- confusionMatrix(knn_predict, income_df_valid_y)
+
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <-  list(Model = "K-Nearest Neighbors", 
+                                             TP = a1[["table"]][4], 
+                                             FN = a1[["table"]][3], 
+                                             FP = a1[["table"]][2], 
+                                             TN = a1[["table"]][1])
+```
+## XGBoost model
+
+```{r}
+XGBoost_fit <- train(train_x_normalized, 
+                    income_df_train_y,
+                    method = "xgbTree",
+                    preProc = c("center", "scale"),
+                    verbosity = 0)
+
+XGBoost_fit
+```
+
+```{r}
+# Print the Final Model
+XGBoost_fit$finalModel
+```
+
+# Predict on validation data
+```{r}
+XGBoost_predict <- predict(XGBoost_fit,valid_x_normalized)
+```
+
+
+```{r}
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+confusionMatrix(as.factor(XGBoost_predict), as.factor(income_df_valid_y), positive="1")
+
+
+
+# Add results into clf_results dataframe
+x1 <- confusionMatrix(XGBoost_predict, income_df_valid_y, positive = "1")[["overall"]]
+y1 <- confusionMatrix(XGBoost_predict, income_df_valid_y, positive = "1")[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "XGBoost", 
+                                             Accuracy = round (x1[["Accuracy"]],3), 
+                                             Precision = round (y1[["Precision"]],3), 
+                                             Recall = round (y1[["Recall"]],3), 
+                                             F1 = round (y1[["F1"]],3))
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x1[["Accuracy"]],3), "and F1 is ", round (y1[["F1"]],3)  )
+
+# Add results into cost_benefit_df dataframe for cost benefit analysis 
+a1 <- confusionMatrix(XGBoost_predict, income_df_valid_y)
+
+
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <-  list(Model = "XGBoost", 
+                                             TP = a1[["table"]][4], 
+                                             FN = a1[["table"]][3], 
+                                             FP = a1[["table"]][2], 
+                                             TN = a1[["table"]][1])
+```
+## Neural Network
+```{r}
+my.grid <- expand.grid(.decay = c(0.5, 0.1), .size = c(5, 7,10))
+
+
+# stepmax is maximum steps for the training of the neural network
+# threshold is set to 0.01, meaning that if the change in error during an iteration is 
+# less than 1%, then no further optimization will be carried out by the model
+neuralNetwork_fit <- train(income_df_train_x,
+                    income_df_train_y,
+                    method = "nnet",
+                    trace = F,
+                    tuneGrid = my.grid,
+                    linout = 0,
+                    stepmax = 100,
+                    threshold = 0.01 )
+print(neuralNetwork_fit)
+
+# Plot Neural Network 
+plotnet(neuralNetwork_fit$finalModel, y_names = "Loan Acceptance/Denial")
+```
+
+```{r}
+# Predict on test data
+neuralNetwork_predict <- predict(neuralNetwork_fit,income_df_valid_x)
+```
+
+```{r}
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+confusionMatrix(as.factor(neuralNetwork_predict), as.factor(income_df_valid_y), positive="1")
+
+
+
+# Add results into clf_results dataframe
+x1 <- confusionMatrix(neuralNetwork_predict, income_df_valid_y, positive = "1")[["overall"]]
+y1 <- confusionMatrix(neuralNetwork_predict, income_df_valid_y, positive = "1")[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "Neural Network", 
+                                             Accuracy = round (x1[["Accuracy"]],3), 
+                                             Precision = round (y1[["Precision"]],3), 
+                                             Recall = round (y1[["Recall"]],3), 
+                                             F1 = round (y1[["F1"]],3))
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x1[["Accuracy"]],3), "and F1 is ", round (y1[["F1"]],3)  )
+
+# Add results into cost_benefit_df dataframe for cost benefit analysis 
+a1 <- confusionMatrix(neuralNetwork_predict, income_df_valid_y)
+
+
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <-  list(Model = "Neural Network", 
+                                             TP = a1[["table"]][4], 
+                                             FN = a1[["table"]][3], 
+                                             FP = a1[["table"]][2], 
+                                             TN = a1[["table"]][1])
+```
+
+## Decision Trees
+
+```{r}
+
+# Cross validation
+cross_validation <- trainControl(## 10-fold CV
+                                method = "repeatedcv",
+                                number = 10,
+                                ## repeated three times
+                                repeats = 3)
+# Hyperparamter tuning
+# maxdepth =  the maximum depth of the tree that will be created or
+# the length of the longest path from the tree root to a leaf.
+
+Param_Grid <-  expand.grid(maxdepth = 2:10)
+
+dtree_fit <- train(income_df_train_x,
+                   income_df_train_y, 
+                   method = "rpart2",
+                   # split - criteria to split nodes
+                   parms = list(split = "gini"),
+                   tuneGrid = Param_Grid,
+                   trControl = cross_validation,
+                   # preProc -  perform listed pre-processing to predictor dataframe
+                   preProc = c("center", "scale"),
+                   verbosity = 0)
+
+# check the accuracy for different models
+dtree_fit
+```
+```{r}
+# print the final model
+dtree_fit$finalModel
+```
+```{r}
+# Plot decision tree
+prp(dtree_fit$finalModel, box.palette = "Reds", tweak = 1.2)
+```
+
+```{r}
+# Predict using decision tree model
+dtree_predict = predict(dtree_fit, newdata = income_df_test_x)
+#dtree_predict
+```
+
+```{r}
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+confusionMatrix(as.factor(dtree_predict), as.factor(income_df_test_y), positive = "1")
+
+#confusionMatrix(dtree_predict, income_df_test_y, positive = "0")[["overall"]]
+#confusionMatrix(dtree_predict, income_df_test_y, positive = "1")[["byClass"]]
+
+# Add results into clf_results dataframe
+x1 <- confusionMatrix(dtree_predict, income_df_test_y, positive = "1")[["overall"]]
+y1 <- confusionMatrix(dtree_predict, income_df_test_y, positive = "1")[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "Decision Tree", 
+                                             Accuracy = round (x1[["Accuracy"]],3), 
+                                             Precision = round (y1[["Precision"]],3), 
+                                             Recall = round (y1[["Recall"]],3), 
+                                             F1 = round (y1[["F1"]],3))
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x1[["Accuracy"]],3), "and F1 is ", round (y1[["F1"]],3)  )
+
+# Add results into cost_benefit_df dataframe for cost benefit analysis 
+a1 <- confusionMatrix(dtree_predict, income_df_test_y)
+
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <-  list(Model = "Decision Tree", 
+                                             TP = a1[["table"]][4], 
+                                             FN = a1[["table"]][3], 
+                                             FP = a1[["table"]][2], 
+                                             TN = a1[["table"]][1])
+```
+
+
+
+## Random Forests
+
+```{r}
+set.seed(100)
+
+#By default, the train function without any arguments re-runs the model over 25 bootstrap samples and across 3 options of the tuning parameter (the tuning #parameter for ranger is mtry; the number of randomly selected predictors at each cut in the tree).
+
+randomforest_fit <- train(income_df_train_x,
+                   income_df_train_y, 
+                   method = "ranger",
+                   importance = "permutation", #this is to get feature importance later
+                  )
+
+#Permutation Importance is assessed for each feature by removing the association between that feature and the target. #This is achieved by randomly #permuting the values of the feature and measuring the resulting increase in error. The influence of the correlated features #is also removed.
+
+# print the  model
+randomforest_fit
+
+```
+
+
+```{r}
+# Predict on test data
+randomforest_predict <- predict(randomforest_fit,income_df_valid_x)
+```
+
+
+
+```{r}
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+#clf_results <- clf_results[-5,]
+confusionMatrix(as.factor(randomforest_predict), as.factor(income_df_valid_y))
+
+
+
+# Add results into clf_results dataframe
+x1 <- confusionMatrix(randomforest_predict, income_df_valid_y, positive = "1")[["overall"]]
+y1 <- confusionMatrix(randomforest_predict, income_df_valid_y, positive = "1")[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "Random Forest", 
+                                             Accuracy = round (x1[["Accuracy"]],3), 
+                                             Precision = round (y1[["Precision"]],3), 
+                                             Recall = round (y1[["Recall"]],3), 
+                                             F1 = round (y1[["F1"]],3))
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x1[["Accuracy"]],3), "and F1 is ", round (y1[["F1"]],3)  )
+
+# Add results into cost_benefit_df dataframe for cost benefit analysis 
+a1 <- confusionMatrix(randomforest_predict, income_df_valid_y)
+
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <-  list(Model = "Random Forest", 
+                                             TP = a1[["table"]][4], 
+                                             FN = a1[["table"]][3], 
+                                             FP = a1[["table"]][2], 
+                                             TN = a1[["table"]][1])
+```
+
+## Using SMOTE to balance the Majority and Minority Class
+
+```{r}
+# What is the class distribution?
+
+# Check the proportions for the class between all 3 datasets.
+round(prop.table(table((income_df$income), exclude = NULL)), 4) * 100
+round(prop.table(table(income_df_train_y)), 4) * 100
+round(prop.table(table(income_df_valid_y)), 4) * 100
+
+# We will use the SMOTE() function from the DMwR package to balance the training data before we build our model.
+#install.packages("abind")
+library("abind")
+
+#install.packages( "https://cran.r-project.org/src/contrib/Archive/DMwR/DMwR_0.4.1.tar.gz", repos=NULL, type="source" )
+library("DMwR")
+set.seed(1234)
+
+#create the full training dataset with X and y variable
+income_smote_train <-  cbind(income_df_train_x, income_df_train_y)
+table(income_smote_train$income_df_train_y)
+#table(donors_train$donors_y_train)
+
+income_smote_valid <-  cbind(income_df_valid_x, income_df_valid_y)
+table(income_smote_valid$income_df_valid_y)
+
+
+#lets see what's inside the SMOTE function
+
+View(DMwR::SMOTE)
+income_smote_train_balanced <- SMOTE(income_df_train_y ~ ., data.frame(income_smote_train), perc.over = 100, perc.under = 200)
+
+income_smote_valid_balanced <- SMOTE(income_df_valid_y ~ ., data.frame(income_smote_valid), perc.over = 100, perc.under = 200)
+
+
+table(income_smote_train_balanced$income_df_train_y)
+
+table(income_smote_valid_balanced$income_df_valid_y)
+
+# Check the proportions for the class between all 3 datasets.
+
+round(prop.table(table((income_df_train$income), exclude = NULL)), 4) * 100
+round(prop.table(table(income_smote_train_balanced$income_df_train_y)), 4) * 100
+round(prop.table(table(income_df_valid_y)), 4) * 100
+
+library(dplyr)
+
+income_smote_x_train <- income_smote_train_balanced %>% select(-income_df_train_y)
+
+income_smote_y_train <- income_smote_train_balanced %>% pull(income_df_train_y) %>% as.factor()
+
+income_smote_x_valid <- income_smote_valid_balanced %>% select(-income_df_valid_y)
+
+income_smote_y_valid <- income_smote_valid_balanced %>% pull(income_df_valid_y) %>% as.factor()
+
+#cpnvert level of factor Y variable to YES, NO as TRUE, FALSE gives problem with some models
+
+#donors_y_train_l <- as.factor(ifelse(donors_y_train_l =="TRUE", "YES", "NO"))
+#donors_y_test_l <- as.factor(ifelse(donors_y_test =="TRUE", "YES", "NO"))
+
+
+smote_x_train_normalized <- as.data.frame(lapply(income_smote_x_train, normalize))
+ 
+smote_x_valid_normalized <- as.data.frame(lapply(income_smote_x_valid, normalize))
+
+```
+
+
+## XGBoost With SMOTE
+
+```{r, warning=FALSE}
+XGBoost_smote_fit <- train(smote_x_train_normalized, 
+                    income_smote_y_train,
+                    method = "xgbTree",
+                    preProc = c("center", "scale"),
+                    verbosity = 0)
+
+XGBoost_smote_fit
+```
+
+```{r}
+# Print the Final Model
+XGBoost_smote_fit$finalModel
+```
+
+
+```{r}
+# Predict on test data
+XGBoost_smote_predict <- predict(XGBoost_smote_fit,smote_x_valid_normalized)
+```
+
+
+
+
+```{r}
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+confusionMatrix(as.factor(XGBoost_smote_predict), as.factor(income_smote_y_valid), positive="1")
+
+
+
+# Add results into clf_results dataframe
+x1 <- confusionMatrix(XGBoost_smote_predict, income_smote_y_valid, positive = "1")[["overall"]]
+y1 <- confusionMatrix(XGBoost_smote_predict, income_smote_y_valid, positive = "1")[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <-  list(Model = "XGBoost Smote", 
+                                             Accuracy = round (x1[["Accuracy"]],3), 
+                                             Precision = round (y1[["Precision"]],3), 
+                                             Recall = round (y1[["Recall"]],3), 
+                                             F1 = round (y1[["F1"]],3))
+# Print Accuracy and F1 score
+
+cat("Accuarcy is ", round(x1[["Accuracy"]],3), "and F1 is ", round (y1[["F1"]],3)  )
+
+# Add results into cost_benefit_df dataframe for cost benefit analysis 
+a1 <- confusionMatrix(XGBoost_smote_predict, income_smote_y_valid)
+
+
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <-  list(Model = "XGBoost Smote", 
+                                             TP = a1[["table"]][4], 
+                                             FN = a1[["table"]][3], 
+                                             FP = a1[["table"]][2], 
+                                             TN = a1[["table"]][1])
+```
+
+
+## 1.8 ROC and Lift curves for all models
+
+ROC curve - It is a performance measurement for classification problem at various thresholds settings. It tells how much a model is capable of distinguishing between classes.
+
+Y axis - True Positive rate or Sensitivity  = (TP / TP + FN)
+
+X axis - False Positive rate or (1 - specificity) = (FP / TN + FP) 
+
+AUC - Area under ROC curve. Higher the AUC, better the model is at predicting 0s as 0s and 1s as 1s.
+
+Lets Plot ROC curves for all the Models. The more "up and to the left" the ROC curve of a model is, the better the model. Also, higher the Area under curve, the better the model.
+
+```{r}
+
+# Predict probabilities of each model to plot ROC curve
+knnPredict_prob <- predict(knn_fit, newdata = valid_x_normalized, type = "prob")
+#dtree_prob <- predict(dtree_fit, newdata = income_df_valid_x, type = "prob")
+glm_predict_prob <- predict(glm_fit, newdata = income_df_valid_x,  type = "prob")
+XG_boost_prob <- predict(XGBoost_fit, newdata = valid_x_normalized, type = "prob")
+NeuralNetwork_prob <- predict(neuralNetwork_fit, newdata = income_df_valid_x, type = "prob")
+XG_boost_Smote_prob <- predict(XGBoost_smote_fit, newdata = valid_x_normalized, type = "prob")
+#RandomForest_prob <- predict(randomforest_fit, newdata = income_df_valid_x, type = "prob", classProbs = TRUE) 
+
+# List of predictions
+preds_list <- list(  knnPredict_prob[,1], 
+                   #dtree_prob[,1],  
+                   glm_predict_prob[,1], XG_boost_prob[,1], NeuralNetwork_prob[,1], XG_boost_Smote_prob[,1])
+
+#preds_list
+# List of actual values (same for all)
+m <- length(preds_list)
+
+#income_y_test_numeric_0_1 <- ifelse(cancer_y_test=="B",1, 0)
+actuals_list <- rep(list(income_df_valid_y), m-1)
+actuals_list[[m]] = income_df_valid_y
+
+# Plot the ROC curves
+pred <- prediction(preds_list, actuals_list, label.ordering = c("1","0"))
+rocs <- performance(pred,  "tpr", "fpr")
+rocs
+# calculate AUC for all models
+AUC_models <- performance(pred, "auc")
+
+#AUC_models
+auc_knn = round(AUC_models@y.values[[1]], 3)
+#auc_dt = round(AUC_models@y.values[[2]], 3)
+auc_lr = round(AUC_models@y.values[[2]], 3)
+auc_xg = round(AUC_models@y.values[[3]], 3)
+auc_nn = round(AUC_models@y.values[[4]], 3)
+auc_xgs = round(AUC_models@y.values[[5]], 3)
+# Plot the ROC curves
+
+plot(rocs, col = as.list(1:m), main = "ROC Curves of different models")
+legend(x = "bottomright", 
+       legend = c( paste0("KNN - ", auc_knn), 
+                   #paste0("Decision Tree - ", auc_dt), 
+                   paste0("Logistic Regression - ", auc_lr), 
+                   paste0("XG Boost - ", auc_xg), 
+                   paste0("XG Boost SMOTE - ", auc_xgs),
+                   paste0("Neural Net - ", auc_nn)), fill = 1:m)
+
+```
+
+
+## 1.9 Cost Benefit analysis
+
+A model with high accuracy need not be the most profitable one. We can assign different costs to True Positive (TP), True Negative (TN), False Positive (FP), False Negative (FN) and evaluate each model and figure out which one is the most profitable model.
+
+For this exercise lets assume that: 
+
+benefit_TP = benefit for correctly predicting the cell type to be benign = $1000
+benefit_TN = benefit for correctly predicting the cell type to be malignant = $4000 (so that you have a shot at curing it)
+cost_FP = cost of incorrectly predicting a cancer cell as B= $5000 as it could lead to no further screening and eventual death
+cost_FN= cost of incorrectly predicting a cancer cell as M= $200 (cost of additional test that would clarify the situation
+
+
+```{r}
+
+#cost_benefit_df <- cost_benefit_df[-9,]
+
+benefit_TP = 1400
+benefit_TN = 10
+cost_FN = -800
+cost_FP = -1200
+
+cost_benefit_df <- cost_benefit_df %>% 
+                    mutate(Profit = (benefit_TP * TP) + (benefit_TN * TN) + 
+                                    (cost_FP * FP) + (cost_FN * FN))
+
+
+
+```
+
+
+**Compare Profit for all Classification models**
+
+```{r}
+options("scipen"=100, "digits"=4)
+print(cost_benefit_df)
+
+# Plot Profit for all the Classification Models
+
+ggplot(cost_benefit_df %>% arrange(desc(Profit)) %>%
+       mutate(Model=factor(Model, levels=Model) ), 
+       aes(x = Model, y = Profit)) +
+  geom_bar(stat = "identity" , width=0.3, fill="steelblue") + 
+  coord_cartesian(ylim = c(-300000, 5000000)) +
+  geom_hline(aes(yintercept = mean(Profit)),
+             colour = "green",linetype="dashed") +
+  ggtitle("Compare Profit for all Models") +
+  theme(plot.title = element_text(color="black", size=10, hjust = 0.5), axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+
+## 1.2 Load the test data set and do the same pre-processing
+
+```{r }
+
+#import the file using #read the CSV file into a data frame 'income_df'
+income_df_test <- read_csv("test-baggle.csv", col_types = "nnffnfffffnff")
+                                                           
+#create a data frame called 'income_df_test_x' using the same steps as above
+
+# lets look at all the variables
+skim(income_df_test)
+
+#do some exploratory analysis of the categorical features of the data
+
+income_df_test %>%  keep(is.factor) %>%  summary()
+
+# There are few features with more than 6 levels.
+# We use the table() function to get the distribution for their values.
+table(select(income_df_test, workClassification))
+table(select(income_df_test, educationLevel))
+table(select(income_df_test, occupation))
+table(select(income_df_test, nativeCountry))
+
+# There are missing values for workClassification, nativeCountry and occupation.
+# The missing values are represented by an indicator variable of '?'.
+# Let's replace these with 'UNK' instead.
+
+income_df_test <- income_df_test %>%
+  mutate(workClassification = recode(workClassification, "?" = "UNK")) %>%
+  mutate(nativeCountry = recode(nativeCountry, "?" = "UNK")) %>%
+  mutate(occupation = recode(occupation, "?" = "UNK")) 
+
+# What do we now have?
+table(select(income_df_test, workClassification))
+table(select(income_df_test, occupation))
+table(select(income_df_test, nativeCountry))
+
+
+# Before we build our model, let's also recode our class levels to 0 and 1. 
+#income_df_test <- income_df_test %>%
+  #mutate(income = recode(income, "<=50K" = "0")) %>%
+  #mutate(income = recode(income, ">50K" = "1"))
+
+# What do we now have?
+#summary(income_df_test[,"income"])
+
+# create Y and X data frames
+#we will need the y column as a vector (X to be a dataframe)
+# dplyr allows us to do this by using 'pull' instead of select
+#income_df_test_y = income_df_test %>% pull("income") 
+
+
+#income_df_test_x = income_df_test %>% select(-c("income"))
+income_df_final_test_id = income_df_test %>% select(c("Id"))
+income_df_final_test_x = income_df_test %>% select(-c("Id"))
+
+
+```
+
+```{r}
+
+library(fastDummies)
+
+#Changing all categorical variables to dummy variables.
+income_df_final_test_dummvar_x <- dummy_cols(income_df_final_test_x, remove_selected_columns = TRUE)
+
+
+income_df_final_test_dummvar_x$income_NA <- NA
+
+# Rename the "income_NA" column to "income"
+colnames(income_df_final_test_dummvar_x)[colnames(income_df_final_test_dummvar_x) == "income_NA"] ="income"                 
+```
+
+```{r}
+
+
+income_df_final_test_dummvar_x_reorder <- income_df_final_test_dummvar_x
+
+#income_df_train_x <- income_df_train_x[, -which(names(income_df_train_x) == "nativeCountry_Holand-Netherlands")]
+
+
+columns_to_keep <- colnames(income_df_train_x)
+
+
+income_df_final_test_dummvar_x_reorder <- income_df_final_test_dummvar_x_reorder %>%
+  select(all_of(columns_to_keep))
+
+
+income_df_final_test_dummvar_x_reorder <- as.data.frame(lapply(income_df_final_test_dummvar_x_reorder, normalize))
+
+```
+
+
+## 1.6 if you have landed on a model you can predict on the test data and save your solution
+```{r }
+# shows you sample code if your best model was yyy_fit. 
+# Predict on test data
+XGBoost_test_predict <- predict(XGBoost_smote_fit, newdata = income_df_final_test_dummvar_x_reorder)
+
+
+#XGBoost_predict
+Test_Prediction_Output = cbind(income_df_final_test_id, income_df_final_test_x, XGBoost_test_predict)
+
+Test_Prediction_Output <- subset(Test_Prediction_Output, select = -income)
+
+colnames(Test_Prediction_Output)[colnames(Test_Prediction_Output) == "XGBoost_test_predict"] ="income"
+
+
+final_output <- Test_Prediction_Output[, c('Id', 'income')]
+
+filename <- "AdFlow"
+ 
+write.csv(final_output, "AdFlow.csv", row.names=FALSE)
+
+```
+
+
+
