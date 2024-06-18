@@ -1,5 +1,4 @@
 ---
-title: "Assignment2"
 author: "Susmitha Mutapally"
 date: "`r Sys.Date()`"
 output: 
